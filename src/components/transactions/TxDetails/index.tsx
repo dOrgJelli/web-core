@@ -2,9 +2,11 @@ import React, { type ReactElement } from 'react'
 import type { TransactionDetails, TransactionSummary } from '@safe-global/safe-gateway-typescript-sdk'
 import { getTransactionDetails, Operation } from '@safe-global/safe-gateway-typescript-sdk'
 import { Box, CircularProgress } from '@mui/material'
+import { PolywrapClient } from '@polywrap/client-js'
 
 import TxSigners from '@/components/transactions/TxSigners'
 import Summary from '@/components/transactions/TxDetails/Summary'
+import TxDescription from '@/components/transactions/TxDetails/TxDescription'
 import TxData from '@/components/transactions/TxDetails/TxData'
 import useChainId from '@/hooks/useChainId'
 import useAsync from '@/hooks/useAsync'
@@ -38,9 +40,10 @@ export const NOT_AVAILABLE = 'n/a'
 type TxDetailsProps = {
   txSummary: TransactionSummary
   txDetails: TransactionDetails
+  txDescription?: string
 }
 
-const TxDetailsBlock = ({ txSummary, txDetails }: TxDetailsProps): ReactElement => {
+const TxDetailsBlock = ({ txSummary, txDetails, txDescription }: TxDetailsProps): ReactElement => {
   const chainId = useChainId()
   const wallet = useWallet()
   const isWrongChain = useIsWrongChain()
@@ -61,6 +64,14 @@ const TxDetailsBlock = ({ txSummary, txDetails }: TxDetailsProps): ReactElement 
         <div className={css.shareLink}>
           <TxShareLink id={txSummary.id} />
         </div>
+
+        {txDescription && (
+          <div className={css.txData}>
+            <ErrorBoundary fallback={<div>Error parsing data</div>}>
+              <TxDescription txDescription={txDescription} />
+            </ErrorBoundary>
+          </div>
+        )}
 
         <div className={css.txData}>
           <ErrorBoundary fallback={<div>Error parsing data</div>}>
@@ -118,19 +129,104 @@ const TxDetailsBlock = ({ txSummary, txDetails }: TxDetailsProps): ReactElement 
   )
 }
 
+// NOTE: From this line down, I've hacked-in the integration for demonstration purposes.
+// This should be done in a more best-practices way in the future.
+const client = new PolywrapClient()
+
 const TxDetails = ({
   txSummary,
   txDetails,
+  txDescription,
 }: {
   txSummary: TransactionSummary
   txDetails?: TransactionDetails // optional
+  txDescription?: string // optional
 }): ReactElement => {
   const chainId = useChainId()
   const { safe } = useSafeInfo()
 
-  const [txDetailsData, error, loading] = useAsync<TransactionDetails>(
-    async () => {
-      return txDetails || getTransactionDetails(chainId, txSummary.id)
+  const [txData, error, loading] = useAsync<{
+    txDetails: TransactionDetails
+    txDescription?: string
+  }>(
+    async (): Promise<{
+      txDetails: TransactionDetails
+      txDescription?: string
+    }> => {
+      if (txDetails) {
+        return {
+          txDetails,
+          txDescription,
+        }
+      }
+
+      return getTransactionDetails(chainId, txSummary.id).then(async (details) => {
+        if (details.safeAppInfo && details.txData && details.txData.dataDecoded) {
+          const appUrl = details.safeAppInfo.url
+          let decoder: string | undefined = undefined
+
+          // NOTE: this is a hack. Ideally this type of app->tx_decoder
+          //       association should be apart of the safe app's metadata.
+          const appDecoders = {
+            'ens.domains': 'wrap://ipfs/QmQNDqGHFDfyhoWrMewq8riHsqQzCSHS4eN9cRXHww3gkM',
+            // NOTE: Polywrap also supports ENS URIs, for example wrap://ens/domain.eth:text-record
+            // NOTE: The source for the wrapper above currently lives here:
+            // https://github.com/dorgjelli/ens-decoder
+          }
+
+          for (const appDecoder of Object.entries(appDecoders)) {
+            if (appUrl.includes(appDecoder[0])) {
+              decoder = appDecoder[1]
+            }
+          }
+
+          if (!decoder) {
+            return {
+              txDetails: details,
+              txDescription: undefined,
+            }
+          }
+
+          let parameters = details.txData.dataDecoded.parameters?.map((p) => ({
+            name: p.name,
+            type: p.type,
+            value: typeof p.value === 'string' ? p.value : JSON.stringify(p.value),
+          }))
+
+          // Run the decoder's custom wasm module, which returns
+          // a human readable description of the transaction
+          const res = await client.invoke<string>({
+            uri: decoder,
+            method: 'decode',
+            args: {
+              txData: {
+                to: details.txData.to.value,
+                method: details.txData.dataDecoded.method,
+                parameters: parameters,
+              },
+            },
+          })
+
+          if (!res.ok) {
+            return {
+              txDetails: details,
+              txDescription: undefined,
+            }
+          }
+
+          console.log(res.value)
+
+          return {
+            txDetails: details,
+            txDescription: res.value,
+          }
+        } else {
+          return {
+            txDetails: details,
+            txDescription: undefined,
+          }
+        }
+      })
     },
     [txDetails, chainId, txSummary.id, safe.txQueuedTag],
     false,
@@ -138,7 +234,9 @@ const TxDetails = ({
 
   return (
     <div className={css.container}>
-      {txDetailsData && <TxDetailsBlock txSummary={txSummary} txDetails={txDetailsData} />}
+      {txData && (
+        <TxDetailsBlock txSummary={txSummary} txDetails={txData.txDetails} txDescription={txData.txDescription} />
+      )}
       {loading && (
         <div className={css.loading}>
           <CircularProgress />

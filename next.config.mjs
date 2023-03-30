@@ -77,6 +77,12 @@ const nextConfig = {
       'mainnet.json': path.resolve('./node_modules/@ethereumjs/common/dist.browser/genesisStates/mainnet.json'),
     }
 
+    config.resolve.fallback = {
+      fs: false,
+      os: false,
+      path: false,
+    };
+
     return config
   },
 }
